@@ -1,0 +1,49 @@
+-- Zone-selected HTTPS certificates are managed independently of device issuance.
+app.page=io:dofile(".lua/www/engine.lua",setmetatable({io=io},{__index=_G}))
+app.config=appreq"config"
+assert(ba.tpm and ba.tpm.createkey and ba.tpm.keyparams and ba.tpm.createcsr and ba.tpm.createcertificate,
+   "SharkCA requires TPM signing support")
+local starting=false
+local function startIssuer()
+   if starting or not app.config.configured then return end
+   starting=true
+   app.issuer.start(function(started,err)
+      app.ready=started
+      if started then app.listener.refresh() end
+      if not started then app.alerts.record("issuer_initialization_failed") end
+      trace(started and "SharkCA: Ready (TPM issuer)" or "SharkCA: issuer initialization failed: "..tostring(err))
+   end)
+end
+app.store=appreq"registry".open(app.config,function(ok)
+   if not ok then return end
+   app.alerts.initialize(function(ok,err)
+   if not ok then trace("SharkCA: alert storage unavailable") return end
+   app.admin.initialize(function(loaded,err)
+      if not loaded then trace("SharkCA: administration storage failed: "..tostring(err)) return end
+      app.lifecycle.initialize(function(ok,err)
+      if not ok then trace("SharkCA: CA lifecycle storage unavailable") return end
+      startIssuer()
+      trace("SharkCA: Administration available at / (HTTPS)")
+      end)
+   end)
+   end)
+end)
+app.alerts=appreq"alerts".create(app.config,app.store)
+app.issuer=appreq"issuer".create(app.config,app.store)
+app.lifecycle=appreq"lifecycle".create(app.config,app.store)
+app.listener=appreq"listener".create(app.config,app.store)
+app.admin=appreq"admin".create(app.config,app.store,startIssuer)
+app.sharktrust=appreq"sharktrust".create(app.config,app.store)
+local acme=appreq"acme".create(app.config,app.store,app.issuer)
+app.acmeDir=ba.create.dir"acme"
+app.acmeDir:setfunc(function(_ENV,path)
+   acme(request,response,path)
+   return true
+end)
+dir:insert(app.acmeDir,true)
+function onunload()
+   app.ready=false app.admin.close() app.alerts.close()
+   app.lifecycle.close(function()
+      app.listener.close(function() app.issuer.close(function() app.store.close() end) end)
+   end)
+end
